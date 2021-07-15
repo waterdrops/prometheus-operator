@@ -26,12 +26,19 @@ import (
 )
 
 const (
-	firstParagraph = `<br>
-<div class="alert alert-info" role="alert">
-    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.39.0, Prometheus Operator requires use of Kubernetes v1.16.x and up.
-</div>
-
-# API Docs
+	firstParagraph = `---
+title: "API"
+description: "Generated API docs for the Prometheus Operator"
+lead: ""
+date: 2021-03-08T08:49:31+00:00
+draft: false
+images: []
+menu:
+  docs:
+    parent: "operator"
+weight: 1000
+toc: true
+---
 
 This Document documents the types introduced by the Prometheus Operator to be consumed by users.
 
@@ -74,7 +81,7 @@ func printTOC(types []KubeTypes) {
 func printAPIDocs(paths []string) {
 	fmt.Println(firstParagraph)
 
-	types := ParseDocumentationFrom(paths)
+	types, _ := ParseDocumentationFrom(paths)
 	for _, t := range types {
 		strukt := t[0]
 		selfLinks[strukt.Name] = "#" + strings.ToLower(strukt.Name)
@@ -82,7 +89,7 @@ func printAPIDocs(paths []string) {
 	}
 
 	// we need to parse once more to now add the self links and the inlined fields
-	types = ParseDocumentationFrom(paths)
+	types, typesIndex := ParseDocumentationFrom(paths)
 
 	printTOC(types)
 
@@ -90,10 +97,19 @@ func printAPIDocs(paths []string) {
 		strukt := t[0]
 		if len(t) > 1 {
 			fmt.Printf("\n## %s\n\n%s\n\n", strukt.Name, strukt.Doc)
+			appearsIn := typesIndex[strukt.Name]
+			if len(appearsIn) > 0 {
+				relatedLinks := make([]string, 0, len(appearsIn))
+				for _, inType := range appearsIn {
+					link := fmt.Sprintf("[%s](#%s)", inType, toSectionLink(inType))
+					relatedLinks = append(relatedLinks, link)
+				}
+				fmt.Printf("\n<em>appears in: %s</em>\n\n", strings.Join(relatedLinks, ", "))
+			}
 
 			fmt.Println("| Field | Description | Scheme | Required |")
 			fmt.Println("| ----- | ----------- | ------ | -------- |")
-			fields := t[1:(len(t))]
+			fields := t[1:]
 			for _, f := range fields {
 				fmt.Println("|", f.Name, "|", f.Doc, "|", f.Type, "|", f.Mandatory, "|")
 			}
@@ -103,29 +119,34 @@ func printAPIDocs(paths []string) {
 	}
 }
 
-// Pair of strings. We keed the name of fields and the doc
-type Pair struct {
+// KubeType of strings. We keed the name of fields and the doc
+type KubeType struct {
 	Name, Doc, Type string
 	Mandatory       bool
 }
 
 // KubeTypes is an array to represent all available types in a parsed file. [0] is for the type itself
-type KubeTypes []Pair
+type KubeTypes []KubeType
 
 // ParseDocumentationFrom gets all types' documentation and returns them as an
 // array. Each type is again represented as an array (we have to use arrays as we
 // need to be sure for the order of the fields). This function returns fields and
 // struct definitions that have no documentation as {name, ""}.
-func ParseDocumentationFrom(srcs []string) []KubeTypes {
+func ParseDocumentationFrom(srcs []string) ([]KubeTypes, map[string][]string) {
 	var docForTypes []KubeTypes
+	typesIndex := make(map[string][]string)
 
 	for _, src := range srcs {
 		pkg := astFrom(src)
 
 		for _, kubType := range pkg.Types {
 			if structType, ok := kubType.Decl.Specs[0].(*ast.TypeSpec).Type.(*ast.StructType); ok {
+				for _, fieldName := range getFieldNames(structType) {
+					typesIndex[fieldName] = append(typesIndex[fieldName], kubType.Name)
+				}
+
 				var ks KubeTypes
-				ks = append(ks, Pair{kubType.Name, fmtRawDoc(kubType.Doc), "", false})
+				ks = append(ks, KubeType{kubType.Name, fmtRawDoc(kubType.Doc), "", false})
 
 				for _, field := range structType.Fields.List {
 					// Treat inlined fields separately as we don't want the original types to appear in the doc.
@@ -141,7 +162,7 @@ func ParseDocumentationFrom(srcs []string) []KubeTypes {
 					fieldMandatory := fieldRequired(field)
 					if n := fieldName(field); n != "-" {
 						fieldDoc := fmtRawDoc(field.Doc.Text())
-						ks = append(ks, Pair{n, fieldDoc, typeString, fieldMandatory})
+						ks = append(ks, KubeType{n, fieldDoc, typeString, fieldMandatory})
 					}
 				}
 				docForTypes = append(docForTypes, ks)
@@ -149,7 +170,7 @@ func ParseDocumentationFrom(srcs []string) []KubeTypes {
 		}
 	}
 
-	return docForTypes
+	return docForTypes, typesIndex
 }
 
 func astFrom(filePath string) *doc.Package {
@@ -233,18 +254,16 @@ func isInlined(field *ast.Field) bool {
 }
 
 func isInternalType(typ ast.Expr) bool {
-	switch typ.(type) {
+	switch typ := typ.(type) {
 	case *ast.SelectorExpr:
-		e := typ.(*ast.SelectorExpr)
-		pkg := e.X.(*ast.Ident)
+		pkg := typ.X.(*ast.Ident)
 		return strings.HasPrefix(pkg.Name, "monitoring")
 	case *ast.StarExpr:
-		return isInternalType(typ.(*ast.StarExpr).X)
+		return isInternalType(typ.X)
 	case *ast.ArrayType:
-		return isInternalType(typ.(*ast.ArrayType).Elt)
+		return isInternalType(typ.Elt)
 	case *ast.MapType:
-		mapType := typ.(*ast.MapType)
-		return isInternalType(mapType.Key) && isInternalType(mapType.Value)
+		return isInternalType(typ.Key) && isInternalType(typ.Value)
 	default:
 		return true
 	}
@@ -276,22 +295,56 @@ func fieldRequired(field *ast.Field) bool {
 }
 
 func fieldType(typ ast.Expr) string {
-	switch typ.(type) {
+	switch typ := typ.(type) {
 	case *ast.Ident:
-		return toLink(typ.(*ast.Ident).Name)
+		return toLink(typ.Name)
 	case *ast.StarExpr:
-		return "*" + toLink(fieldType(typ.(*ast.StarExpr).X))
+		return "*" + toLink(fieldType(typ.X))
 	case *ast.SelectorExpr:
-		e := typ.(*ast.SelectorExpr)
-		pkg := e.X.(*ast.Ident)
-		t := e.Sel
+		pkg := typ.X.(*ast.Ident)
+		t := typ.Sel
 		return toLink(pkg.Name + "." + t.Name)
 	case *ast.ArrayType:
-		return "[]" + toLink(fieldType(typ.(*ast.ArrayType).Elt))
+		return "[]" + toLink(fieldType(typ.Elt))
 	case *ast.MapType:
-		mapType := typ.(*ast.MapType)
-		return "map[" + toLink(fieldType(mapType.Key)) + "]" + toLink(fieldType(mapType.Value))
+		return "map[" + toLink(fieldType(typ.Key)) + "]" + toLink(fieldType(typ.Value))
 	default:
 		return ""
 	}
+}
+
+func getFieldNames(structType *ast.StructType) []string {
+	var fieldNames []string
+	foundFields := make(map[string]struct{})
+
+	for _, ft := range structType.Fields.List {
+		fieldName := getFieldName(ft.Type)
+		// Field name not identified, continue
+		if fieldName == "" {
+			continue
+		}
+
+		// Skip if field has already been found in the struct
+		if _, ok := foundFields[fieldName]; ok {
+			continue
+		}
+
+		fieldNames = append(fieldNames, fieldName)
+		foundFields[fieldName] = struct{}{}
+	}
+
+	return fieldNames
+}
+
+func getFieldName(ft ast.Expr) string {
+	switch ft := ft.(type) {
+	case *ast.Ident:
+		return ft.Name
+	case *ast.ArrayType:
+		return getFieldName(ft.Elt)
+	case *ast.StarExpr:
+		return getFieldName(ft.X)
+	}
+
+	return ""
 }
